@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `cmux-organize`: Auto-classify surfaces by topic (work / research / tools)
+- `cmux-organize`: Keyword-based surface classifier (standalone fallback)
+- `cmux-reorganize`: Mechanical pane reorganizer — accepts explicit surface group assignments
+- `/cmux-kit:organize` skill: AI-powered two-stage pipeline (explore → Claude classifies → reorganize)
 - `cmux-snapshot`: Save cmux layout + Claude session IDs as JSON snapshot
 - `cmux-restore`: Restore layout + Claude sessions from snapshot (`CMUX_RESTORE_DELAY` env var)
 - `cmux-preview`: Live Markdown side-panel preview

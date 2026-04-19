@@ -1,0 +1,149 @@
+#!/bin/zsh
+# cmux-reorganize: 명시적 surface→group 매핑을 받아 pane 재배치를 실행합니다.
+# 이 스크립트는 분류 로직 없이 재배치만 담당합니다.
+# 분류는 cmux-organize (키워드) 또는 Claude Skills (AI) 가 담당합니다.
+#
+# 사용법:
+#   cmux-reorganize [--research "surface:1 surface:2"] [--tools "surface:3"] [workspace-ref]
+#
+# 예시:
+#   cmux-reorganize --research "surface:3 surface:5" --tools "surface:2" workspace:1
+#
+# NOTE: zsh 1-indexed arrays used throughout
+
+set -euo pipefail
+
+if ! command -v cmux &>/dev/null; then
+  echo "Error: cmux CLI를 찾을 수 없습니다."
+  exit 1
+fi
+
+# ── 인자 파싱 ─────────────────────────────────────────────
+RESEARCH_SURFACES=()
+TOOLS_SURFACES=()
+WORKSPACE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --research)
+      shift
+      for s in ${=1}; do RESEARCH_SURFACES+=("$s"); done
+      ;;
+    --tools)
+      shift
+      for s in ${=1}; do TOOLS_SURFACES+=("$s"); done
+      ;;
+    workspace:*)
+      WORKSPACE="$1"
+      ;;
+    *)
+      echo "Error: 알 수 없는 인자: $1"
+      echo "Usage: cmux-reorganize [--research \"surf:N ...\"] [--tools \"surf:N ...\"] [workspace-ref]"
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+WORKSPACE="${WORKSPACE:-${CMUX_WORKSPACE_ID:-}}"
+if [[ -z "$WORKSPACE" ]]; then
+  echo "Error: workspace 참조가 필요합니다. 인자로 전달하거나 cmux 터미널 안에서 실행하세요."
+  exit 1
+fi
+
+if [[ ${#RESEARCH_SURFACES[@]} -eq 0 && ${#TOOLS_SURFACES[@]} -eq 0 ]]; then
+  echo "분류할 surface가 없습니다. --research 또는 --tools 인자를 전달하세요."
+  exit 0
+fi
+
+PANE_COUNT=$(cmux list-panes --workspace "$WORKSPACE" 2>/dev/null | grep -cE "pane:[0-9]+" || true)
+if [[ "$PANE_COUNT" -gt 1 ]]; then
+  echo "이미 $PANE_COUNT 개의 pane이 있습니다. 이미 정리된 상태입니다."
+  exit 0
+fi
+
+FIRST_PANE=$(cmux list-panes --workspace "$WORKSPACE" 2>/dev/null | grep -oE "pane:[0-9]+" | head -1)
+if [[ -z "$FIRST_PANE" ]]; then
+  echo "Error: '$WORKSPACE' 에서 pane을 찾지 못했습니다."
+  exit 1
+fi
+
+echo "=== cmux-reorganize: $WORKSPACE ==="
+echo "  리서치(${#RESEARCH_SURFACES[@]}개): ${RESEARCH_SURFACES[*]:-없음}"
+echo "  도구(${#TOOLS_SURFACES[@]}개):     ${TOOLS_SURFACES[*]:-없음}"
+echo ""
+
+# ── 공통 split + move 함수 ────────────────────────────────
+_split_and_move() {
+  local direction=$1
+  local anchor_surface=$2
+  local -a surfaces=("${@[3,-1]}")  # zsh: 3번째 이후 모든 인자
+
+  local BEFORE AFTER NEW_PANE SPLIT_OUT AUTO_SURFACE
+  BEFORE=$(cmux list-panes --workspace "$WORKSPACE" 2>/dev/null | grep -oE "pane:[0-9]+" | sort)
+  SPLIT_OUT=$(cmux new-split "$direction" --workspace "$WORKSPACE" --surface "$anchor_surface")
+  AUTO_SURFACE=$(echo "$SPLIT_OUT" | grep -oE "surface:[0-9]+" || true)
+  AFTER=$(cmux list-panes --workspace "$WORKSPACE" 2>/dev/null | grep -oE "pane:[0-9]+" | sort)
+  NEW_PANE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -1)
+
+  if [[ -z "$NEW_PANE" ]]; then
+    echo "  Error: 새 pane 감지 실패"
+    return 1
+  fi
+
+  for surf in "${surfaces[@]}"; do
+    ERR=$(cmux move-surface --surface "$surf" --pane "$NEW_PANE" 2>&1) && \
+      echo "  이동: $surf → $NEW_PANE" || \
+      echo "  Warning: $surf 이동 실패 — $ERR"
+  done
+
+  [[ -n "$AUTO_SURFACE" ]] && cmux close-surface --surface "$AUTO_SURFACE" --workspace "$WORKSPACE" 2>/dev/null || true
+  echo "$NEW_PANE"
+}
+
+# ── 단계 1: 오른쪽 pane → research ───────────────────────
+RESEARCH_PANE=""
+if [[ ${#RESEARCH_SURFACES[@]} -gt 0 ]]; then
+  echo "→ 리서치 그룹: 오른쪽 pane 생성..."
+  # work anchor: research/tools 외 첫 번째 surface (없으면 research[1])
+  ALL_CURRENT=$(cmux list-pane-surfaces --workspace "$WORKSPACE" --pane "$FIRST_PANE" 2>/dev/null | grep -oE "surface:[0-9]+")
+  COMBINED=("${RESEARCH_SURFACES[@]}" "${TOOLS_SURFACES[@]}")
+  ANCHOR=""
+  for s in ${=ALL_CURRENT}; do
+    if ! (( ${COMBINED[(Ie)$s]} )); then
+      ANCHOR="$s"
+      break
+    fi
+  done
+  ANCHOR="${ANCHOR:-${RESEARCH_SURFACES[1]}}"
+
+  RESEARCH_PANE=$(_split_and_move right "$ANCHOR" "${RESEARCH_SURFACES[@]}")
+fi
+
+# ── 단계 2: research 아래 or 오른쪽 → tools ─────────────
+if [[ ${#TOOLS_SURFACES[@]} -gt 0 ]]; then
+  if [[ -n "$RESEARCH_PANE" ]]; then
+    echo "→ 도구 그룹: 리서치 pane 아래 pane 생성..."
+    _split_and_move down "${RESEARCH_SURFACES[1]}" "${TOOLS_SURFACES[@]}" > /dev/null
+  else
+    # research 없는 경우: work anchor가 있어야 함
+    ALL_CURRENT=$(cmux list-pane-surfaces --workspace "$WORKSPACE" --pane "$FIRST_PANE" 2>/dev/null | grep -oE "surface:[0-9]+")
+    WORK_ANCHOR=""
+    for s in ${=ALL_CURRENT}; do
+      if ! (( ${TOOLS_SURFACES[(Ie)$s]} )); then
+        WORK_ANCHOR="$s"
+        break
+      fi
+    done
+    if [[ -z "$WORK_ANCHOR" ]]; then
+      echo "  Info: work surface가 없어 도구 그룹 분리를 건너뜁니다."
+    else
+      echo "→ 도구 그룹: 오른쪽 pane 생성..."
+      _split_and_move right "$WORK_ANCHOR" "${TOOLS_SURFACES[@]}" > /dev/null
+    fi
+  fi
+fi
+
+echo ""
+echo "=== 완료 ==="
+cmux tree --workspace "$WORKSPACE" 2>/dev/null || true

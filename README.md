@@ -62,7 +62,8 @@ $EDITOR ~/.local/bin/cmux-day-start  # edit PROJECTS_ROOT and workspace list
 
 | Command | Description | Slash Command |
 |---------|-------------|---------------|
-| `cmux-organize [ws]` | Auto-classify surfaces into themed panes | `/cmux-kit:organize` |
+| `cmux-organize [ws]` | Keyword-based surface classifier (standalone) | — |
+| `/cmux-kit:organize` | **AI-powered** classifier — Claude reads surfaces and classifies by context | `/cmux-kit:organize` |
 | `cmux-snapshot [name]` | Save current layout + Claude session snapshot | `/cmux-kit:snapshot` |
 | `cmux-restore [name]` | Restore layout + Claude sessions from snapshot | `/cmux-kit:restore` |
 | `cmux-preview <file.md>` | Live Markdown side-panel preview | `/cmux-kit:preview` |
@@ -72,13 +73,23 @@ $EDITOR ~/.local/bin/cmux-day-start  # edit PROJECTS_ROOT and workspace list
 
 ---
 
-## cmux-organize: Classification Rules
+## cmux-organize: How it works
 
-| Group | Keyword Patterns |
-|-------|-----------------|
-| **research** | research, deep.dive, survey, 리서치, 조사 |
-| **tools** | skill, plugin, hook, claude, n8n, obsidian, kaizen |
-| **work** | everything else (stays in main pane) |
+The skill uses a **two-stage pipeline**:
+
+**Stage 1 — Explore**: Claude reads all surface titles in the workspace via `cmux list-pane-surfaces`.
+
+**Stage 2 — Classify**: Claude reasons about each surface title by context (not keywords) and proposes a grouping:
+
+| Group | Judgment Criteria |
+|-------|------------------|
+| **research** | Info gathering, docs, references, learning |
+| **tools** | Dev tools, plugins, settings, skill development |
+| **work** | Active coding, tasks, PRs (stays in main pane) |
+
+Claude shows the classification plan for confirmation before executing. You can correct any misclassified surfaces before changes are applied.
+
+**Stage 3 — Reorganize**: `cmux-reorganize` moves surfaces into new panes based on the confirmed plan.
 
 ```
 Before                  After
@@ -89,6 +100,8 @@ Before                  After
 │ tools-1        │      │          │          │
 └────────────────┘      └──────────┴──────────┘
 ```
+
+> `cmux-organize` (CLI) still works standalone with keyword-based matching as a fallback.
 
 ---
 
