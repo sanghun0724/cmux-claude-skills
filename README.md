@@ -142,6 +142,38 @@ CMUX_RESTORE_DELAY=1.0 cmux-restore
 
 ---
 
+## Environment Variables
+
+All scripts support environment variables so you can adapt them to your setup without modifying the files.
+
+| Variable | Default | Used by |
+|----------|---------|---------|
+| `CMUX_SNAPSHOT_DIR` | `~/.cmux-snapshots` | `cmux-snapshot`, `cmux-restore` |
+| `CMUX_SESSION_FILE` | `~/Library/Application Support/cmux/session-com.cmuxterm.app.json` | `cmux-snapshot` |
+| `CMUX_CLAUDE_PROJECTS` | `~/.claude/projects` | `cmux-snapshot` |
+| `CMUX_RESTORE_DELAY` | `0.3` | `cmux-restore` (seconds between cmux calls) |
+| `CMUX_RESEARCH_KEYWORDS` | built-in list | `cmux-organize` (pipe-separated regex alternation) |
+| `CMUX_TOOLS_KEYWORDS` | built-in list | `cmux-organize` (pipe-separated regex alternation) |
+| `CMUX_WEB_DEV_CMD` | `npm run dev` | `cmux-web` |
+| `CMUX_INIT_DELAY` | `0.4` | `cmux-day-start` (seconds after workspace creation) |
+| `CMUX_BIN_DIR` | `~/.local/bin` | `install.sh`, `uninstall.sh` |
+
+**Example — custom keyword classification:**
+
+```bash
+export CMUX_RESEARCH_KEYWORDS="research|deep.dive|survey|docs"
+export CMUX_TOOLS_KEYWORDS="plugin|hook|claude|obsidian|n8n"
+cmux-organize workspace:1
+```
+
+**Example — non-standard cmux session path:**
+
+```bash
+CMUX_SESSION_FILE="/path/to/custom-session.json" cmux-snapshot
+```
+
+---
+
 ## Uninstall
 
 ```bash

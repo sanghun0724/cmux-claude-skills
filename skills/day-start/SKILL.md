@@ -27,11 +27,8 @@ chmod +x ~/.local/bin/cmux-day-start
 
 | 커맨드 | 설명 |
 |--------|------|
-| `cmux-ios` | iOS 3-pane (Claude × 3) |
-| `cmux-n8n` | Claude + n8n 브라우저 |
-| `cmux-data` | Claude + Python REPL |
 | `cmux-skills` | Claude + 파일 탐색 |
-| `cmux-web` | Claude + dev 서버 |
+| `cmux-web [dir] [cmd]` | Claude + dev 서버 |
 
 ## 실행 후 보고
 

@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # cmux-reorganize: 명시적 surface→group 매핑을 받아 pane 재배치를 실행합니다.
 # 이 스크립트는 분류 로직 없이 재배치만 담당합니다.
 # 분류는 cmux-organize (키워드) 또는 Claude Skills (AI) 가 담당합니다.

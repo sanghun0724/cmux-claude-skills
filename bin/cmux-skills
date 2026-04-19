@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # cmux-skills: Claude 스킬/플러그인 개발 레이아웃
 # +-------------------+----------+
 # | Claude (70%)      | ls / grep|

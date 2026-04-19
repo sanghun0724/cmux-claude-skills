@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # cmux-day-start: 하루 시작 시 모든 워크스페이스 자동 생성
 # 사용법: cmux-day-start
 # 이미 존재하는 워크스페이스는 건너뜁니다
@@ -45,7 +45,7 @@ create_ws() {
   echo "→ '$name' 생성 중..."
   local REF
   REF=$(cmux new-workspace --cwd "$dir" --command "$cmd" | grep -oE "workspace:[0-9]+" | head -1 || true)
-  sleep 0.4
+  sleep "${CMUX_INIT_DELAY:-0.4}"
   [[ -n "$REF" ]] && cmux rename-workspace --workspace "$REF" "$name" 2>/dev/null && echo "  완료: $name"
 }
 

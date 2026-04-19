@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # cmux-organize: 워크스페이스의 기존 surface를 주제별로 자동 분류 → pane으로 재배치
 # 사용법: cmux-organize [workspace-ref]
 
@@ -19,12 +19,18 @@ if [[ -z "$WORKSPACE" ]]; then
 fi
 
 # ── 분류 패턴 ──────────────────────────────────────────────
+# 환경변수로 키워드 커스터마이즈 가능 (| 구분자):
+#   CMUX_RESEARCH_KEYWORDS="리서치|research|deep.dive|survey"
+#   CMUX_TOOLS_KEYWORDS="skill|plugin|hook|claude"
+_RESEARCH_PAT="${CMUX_RESEARCH_KEYWORDS:-리서치|research|deep.dive|지식|저장소|survey|분석|조사}"
+_TOOLS_PAT="${CMUX_TOOLS_KEYWORDS:-skill|스킬|rule|obsidian|kaizen|consistency|hook|plugin|setup|도구|n8n|claude|hud|memory}"
+
 classify_surface() {
   local title
   title=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-  if echo "$title" | grep -qE "리서치|research|deep.dive|지식|저장소|survey|분석|조사"; then
+  if echo "$title" | grep -qE "$_RESEARCH_PAT"; then
     echo "research"
-  elif echo "$title" | grep -qE "skill|스킬|rule|obsidian|kaizen|consistency|hook|plugin|setup|도구|n8n|claude|hud|memory"; then
+  elif echo "$title" | grep -qE "$_TOOLS_PAT"; then
     echo "tools"
   else
     echo "work"

@@ -1,11 +1,12 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # install.sh: cmux-claude-skills 실행 파일을 ~/.local/bin 에 설치합니다.
 # 사용법: ./install.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BIN_DIR="$HOME/.local/bin"
+# CMUX_BIN_DIR 환경변수로 설치 경로 변경 가능
+BIN_DIR="${CMUX_BIN_DIR:-$HOME/.local/bin}"
 BIN_SRC="$SCRIPT_DIR/bin"
 
 echo "=== cmux-claude-skills install ==="

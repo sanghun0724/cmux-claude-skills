@@ -16,7 +16,7 @@ import subprocess
 import time
 from pathlib import Path
 
-SNAPSHOT_DIR = Path.home() / ".cmux-snapshots"
+SNAPSHOT_DIR = Path(os.environ.get("CMUX_SNAPSHOT_DIR", str(Path.home() / ".cmux-snapshots")))
 RESTORE_DELAY = float(os.environ.get("CMUX_RESTORE_DELAY", "0.3"))
 
 # 허용 패턴: cmux가 반환하는 ref 토큰 (workspace:N, pane:N, surface:N)

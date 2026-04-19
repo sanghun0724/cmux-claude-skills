@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # cmux-preview: 마크다운 파일을 사이드 패널에서 실시간 미리보기
 # 사용법: cmux-preview <file.md>
 

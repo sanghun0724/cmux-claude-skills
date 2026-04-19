@@ -1,11 +1,11 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # uninstall.sh: cmux-claude-skills 심볼릭 링크를 제거합니다.
 # 사용법: ./uninstall.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BIN_DIR="$HOME/.local/bin"
+BIN_DIR="${CMUX_BIN_DIR:-$HOME/.local/bin}"
 BIN_SRC="$SCRIPT_DIR/bin"
 
 echo "=== cmux-claude-skills uninstall ==="

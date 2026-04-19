@@ -109,6 +109,32 @@ CMUX_RESTORE_DELAY=1.0 cmux-restore  # 느린 머신용
 
 ---
 
+## 환경변수
+
+파일을 직접 수정하지 않고도 환경변수로 동작을 커스터마이즈할 수 있습니다.
+
+| 변수 | 기본값 | 사용 스크립트 |
+|------|--------|--------------|
+| `CMUX_SNAPSHOT_DIR` | `~/.cmux-snapshots` | `cmux-snapshot`, `cmux-restore` |
+| `CMUX_SESSION_FILE` | `~/Library/Application Support/cmux/session-com.cmuxterm.app.json` | `cmux-snapshot` |
+| `CMUX_CLAUDE_PROJECTS` | `~/.claude/projects` | `cmux-snapshot` |
+| `CMUX_RESTORE_DELAY` | `0.3` | `cmux-restore` (cmux 명령 간 대기 시간, 초) |
+| `CMUX_RESEARCH_KEYWORDS` | 기본 목록 | `cmux-organize` (파이프 구분 정규식) |
+| `CMUX_TOOLS_KEYWORDS` | 기본 목록 | `cmux-organize` (파이프 구분 정규식) |
+| `CMUX_WEB_DEV_CMD` | `npm run dev` | `cmux-web` |
+| `CMUX_INIT_DELAY` | `0.4` | `cmux-day-start` (워크스페이스 생성 후 대기, 초) |
+| `CMUX_BIN_DIR` | `~/.local/bin` | `install.sh`, `uninstall.sh` |
+
+**예시 — 분류 키워드 커스터마이즈:**
+
+```bash
+export CMUX_RESEARCH_KEYWORDS="research|deep.dive|survey|docs"
+export CMUX_TOOLS_KEYWORDS="plugin|hook|claude|obsidian|n8n"
+cmux-organize workspace:1
+```
+
+---
+
 ## 제거
 
 ```bash

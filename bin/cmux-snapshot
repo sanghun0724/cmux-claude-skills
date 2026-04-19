@@ -9,14 +9,20 @@
 """
 
 import json
-import sys
+import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
-SESSION_JSON = Path.home() / "Library/Application Support/cmux/session-com.cmuxterm.app.json"
-SNAPSHOT_DIR = Path.home() / ".cmux-snapshots"
-CLAUDE_PROJECTS = Path.home() / ".claude/projects"
+SESSION_JSON = Path(
+    os.environ.get(
+        "CMUX_SESSION_FILE",
+        str(Path.home() / "Library/Application Support/cmux/session-com.cmuxterm.app.json"),
+    )
+)
+SNAPSHOT_DIR = Path(os.environ.get("CMUX_SNAPSHOT_DIR", str(Path.home() / ".cmux-snapshots")))
+CLAUDE_PROJECTS = Path(os.environ.get("CMUX_CLAUDE_PROJECTS", str(Path.home() / ".claude/projects")))
 
 
 def find_session_id(surface_title: str, cwd: str) -> str | None:
