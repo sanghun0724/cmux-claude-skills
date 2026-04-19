@@ -1,0 +1,54 @@
+#!/bin/zsh
+# cmux-web: 웹뷰 개발 레이아웃 (Claude 좌 + dev 서버 우)
+# +-------------------+----------+
+# | Claude (70%)      | dev 서버 |
+# |                   | 로그     |
+# +-------------------+----------+
+#
+# 사용법: cmux-web [프로젝트-디렉토리] [dev-명령]
+#   기본 dev 명령: flew dev
+#   예: cmux-web ~/myproject "npm run dev"
+#
+# NOTE: DEV_CMD는 사용자가 제공하는 신뢰된 인자입니다.
+#       외부 입력이나 공유 스크립트에서 그대로 전달하지 마세요.
+
+set -euo pipefail
+
+if ! command -v cmux &>/dev/null; then
+  echo "Error: cmux CLI를 찾을 수 없습니다. cmux.app이 설치되어 있는지 확인하세요."
+  exit 1
+fi
+
+if [[ -z "${CMUX_WORKSPACE_ID:-}" ]]; then
+  echo "Error: cmux workspace 터미널 안에서 실행해주세요."
+  exit 1
+fi
+
+CURRENT_PANES=$(cmux list-panes 2>/dev/null | grep -cE "pane:[0-9]+" || true)
+if [[ "$CURRENT_PANES" -gt 1 ]]; then
+  echo "이미 $CURRENT_PANES 개의 pane이 있습니다."
+  exit 1
+fi
+
+PROJECT_DIR="${1:-$PWD}"
+DEV_CMD="${2:-flew dev}"
+echo "웹 개발 레이아웃 설정 중... ($PROJECT_DIR)"
+
+if [[ ! -d "$PROJECT_DIR" ]]; then
+  echo "Warning: 디렉토리가 존재하지 않습니다: $PROJECT_DIR"
+fi
+
+PROJECT_DIR_Q=$(printf '%q' "$PROJECT_DIR")
+
+# 오른쪽에 dev 서버 pane
+RT_OUT=$(cmux new-pane --direction right)
+RT_SURFACE=$(echo "$RT_OUT" | grep -oE "surface:[0-9]+" | head -1)
+if [[ -z "$RT_SURFACE" ]]; then
+  echo "Error: 오른쪽 pane surface ID를 파악할 수 없습니다."
+  exit 1
+fi
+# DEV_CMD는 의도적으로 unquoted — 사용자가 제공한 신뢰된 커맨드
+cmux send --surface "$RT_SURFACE" "cd $PROJECT_DIR_Q && $DEV_CMD"$'\n'
+
+cmux set-status layout "web+devserver" --icon "globe" --color "#00695C"
+echo "완료. 우측 pane에서 '$DEV_CMD'가 시작됩니다."

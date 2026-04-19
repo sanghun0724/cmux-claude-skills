@@ -1,0 +1,29 @@
+#!/bin/zsh
+# cmux-preview: 마크다운 파일을 사이드 패널에서 실시간 미리보기
+# 사용법: cmux-preview <file.md>
+
+set -euo pipefail
+
+if ! command -v cmux &>/dev/null; then
+  echo "Error: cmux CLI를 찾을 수 없습니다. cmux.app이 설치되어 있는지 확인하세요."
+  exit 1
+fi
+
+FILE="${1:-}"
+
+if [[ -z "$FILE" || "$FILE" == "--help" || "$FILE" == "-h" ]]; then
+  echo "Usage: cmux-preview <file.md>"
+  echo "  마크다운 파일을 cmux 사이드 패널에서 실시간 미리보기로 엽니다."
+  exit 0
+fi
+
+# 절대 경로 변환
+FILE=$(realpath "$FILE" 2>/dev/null || echo "$PWD/$FILE")
+
+if [[ ! -f "$FILE" ]]; then
+  echo "Error: 파일 없음 → $FILE"
+  exit 1
+fi
+
+echo "마크다운 뷰어 열기: $FILE"
+cmux markdown open "$FILE"
