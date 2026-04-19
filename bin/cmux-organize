@@ -1,0 +1,144 @@
+#!/bin/zsh
+# cmux-organize: 워크스페이스의 기존 surface를 주제별로 자동 분류 → pane으로 재배치
+# 사용법: cmux-organize [workspace-ref]
+
+set -euo pipefail
+
+# ── 의존성 확인 ─────────────────────────────────────────────
+if ! command -v cmux &>/dev/null; then
+  echo "Error: cmux CLI를 찾을 수 없습니다. cmux.app이 설치되어 있는지 확인하세요."
+  exit 1
+fi
+
+WORKSPACE="${1:-${CMUX_WORKSPACE_ID:-}}"
+
+if [[ -z "$WORKSPACE" ]]; then
+  echo "Usage: cmux-organize [workspace-ref]"
+  echo "  또는 cmux 워크스페이스 터미널 안에서 실행하세요 (CMUX_WORKSPACE_ID 자동 설정)."
+  exit 1
+fi
+
+# ── 분류 패턴 ──────────────────────────────────────────────
+classify_surface() {
+  local title
+  title=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+  if echo "$title" | grep -qE "리서치|research|deep.dive|지식|저장소|survey|분석|조사"; then
+    echo "research"
+  elif echo "$title" | grep -qE "skill|스킬|rule|obsidian|kaizen|consistency|hook|plugin|setup|도구|n8n|claude|hud|memory"; then
+    echo "tools"
+  else
+    echo "work"
+  fi
+}
+
+# ── 첫 번째 pane + surface 파싱 ────────────────────────────
+FIRST_PANE=$(cmux list-panes --workspace "$WORKSPACE" 2>/dev/null | grep -oE "pane:[0-9]+" | head -1)
+if [[ -z "$FIRST_PANE" ]]; then
+  echo "Error: '$WORKSPACE' 에서 pane을 찾지 못했습니다."
+  exit 1
+fi
+
+PANE_COUNT=$(cmux list-panes --workspace "$WORKSPACE" 2>/dev/null | grep -cE "pane:[0-9]+" || true)
+if [[ "$PANE_COUNT" -gt 1 ]]; then
+  echo "이미 $PANE_COUNT 개의 pane이 있습니다. 이미 정리된 상태입니다."
+  exit 0
+fi
+
+echo "=== cmux-organize: $WORKSPACE ==="
+
+WORK_SURFACES=()
+RESEARCH_SURFACES=()
+TOOLS_SURFACES=()
+
+while IFS= read -r line; do
+  [[ -z "$line" ]] && continue
+  SURFACE=$(echo "$line" | grep -oE "surface:[0-9]+")
+  [[ -z "$SURFACE" ]] && continue
+  TITLE=$(echo "$line" | sed -E 's/[* ]*(surface:[0-9]+)[[:space:]]*//' | sed 's/\[selected\]//' | xargs)
+
+  GROUP=$(classify_surface "$TITLE")
+  case $GROUP in
+    research) RESEARCH_SURFACES+=("$SURFACE") ;;
+    tools)    TOOLS_SURFACES+=("$SURFACE") ;;
+    *)        WORK_SURFACES+=("$SURFACE") ;;
+  esac
+  printf "  %-14s → [%-8s] %s\n" "$SURFACE" "$GROUP" "$TITLE"
+done < <(cmux list-pane-surfaces --workspace "$WORKSPACE" --pane "$FIRST_PANE" 2>/dev/null)
+
+echo ""
+echo "  작업(${#WORK_SURFACES[@]}개):     ${WORK_SURFACES[*]:-없음}"
+echo "  리서치(${#RESEARCH_SURFACES[@]}개): ${RESEARCH_SURFACES[*]:-없음}"
+echo "  도구(${#TOOLS_SURFACES[@]}개):     ${TOOLS_SURFACES[*]:-없음}"
+echo ""
+
+if [[ ${#RESEARCH_SURFACES[@]} -eq 0 && ${#TOOLS_SURFACES[@]} -eq 0 ]]; then
+  echo "모든 surface가 'work' 그룹입니다. 분류할 항목이 없어 종료합니다."
+  exit 0
+fi
+
+# ── 단계 1: 오른쪽 pane 생성 → research 이동 ───────────────
+RESEARCH_PANE=""
+if [[ ${#RESEARCH_SURFACES[@]} -gt 0 ]]; then
+  echo "→ 리서치 그룹 오른쪽 pane으로 이동..."
+  ANCHOR="${WORK_SURFACES[1]:-${RESEARCH_SURFACES[1]}}"
+
+  BEFORE=$(cmux list-panes --workspace "$WORKSPACE" 2>/dev/null | grep -oE "pane:[0-9]+" | sort)
+  SPLIT_OUT=$(cmux new-split right --workspace "$WORKSPACE" --surface "$ANCHOR" 2>/dev/null)
+  AUTO_SURFACE=$(echo "$SPLIT_OUT" | grep -oE "surface:[0-9]+" || true)
+  AFTER=$(cmux list-panes --workspace "$WORKSPACE" 2>/dev/null | grep -oE "pane:[0-9]+" | sort)
+  RESEARCH_PANE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -1)
+
+  for surf in "${RESEARCH_SURFACES[@]}"; do
+    ERR=$(cmux move-surface --surface "$surf" --pane "$RESEARCH_PANE" 2>&1) && \
+      echo "  이동: $surf → $RESEARCH_PANE (리서치)" || \
+      echo "  Warning: $surf 이동 실패 — $ERR"
+  done
+
+  [[ -n "$AUTO_SURFACE" ]] && cmux close-surface --surface "$AUTO_SURFACE" --workspace "$WORKSPACE" 2>/dev/null || true
+fi
+
+# ── 단계 2: research pane 아래 → tools pane 생성 ───────────
+TOOLS_PANE=""
+if [[ ${#TOOLS_SURFACES[@]} -gt 0 && -n "$RESEARCH_PANE" ]]; then
+  echo "→ 도구/스킬 그룹 아래 pane으로 이동..."
+  RESEARCH_ANCHOR="${RESEARCH_SURFACES[1]}"  # zsh: 1-indexed (첫 번째 원소)
+
+  BEFORE=$(cmux list-panes --workspace "$WORKSPACE" 2>/dev/null | grep -oE "pane:[0-9]+" | sort)
+  SPLIT_OUT=$(cmux new-split down --workspace "$WORKSPACE" --surface "$RESEARCH_ANCHOR" 2>/dev/null)
+  AUTO_SURFACE=$(echo "$SPLIT_OUT" | grep -oE "surface:[0-9]+" || true)
+  AFTER=$(cmux list-panes --workspace "$WORKSPACE" 2>/dev/null | grep -oE "pane:[0-9]+" | sort)
+  TOOLS_PANE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -1)
+
+  for surf in "${TOOLS_SURFACES[@]}"; do
+    ERR=$(cmux move-surface --surface "$surf" --pane "$TOOLS_PANE" 2>&1) && \
+      echo "  이동: $surf → $TOOLS_PANE (도구)" || \
+      echo "  Warning: $surf 이동 실패 — $ERR"
+  done
+
+  [[ -n "$AUTO_SURFACE" ]] && cmux close-surface --surface "$AUTO_SURFACE" --workspace "$WORKSPACE" 2>/dev/null || true
+elif [[ ${#TOOLS_SURFACES[@]} -gt 0 && ${#WORK_SURFACES[@]} -gt 0 ]]; then
+  # research 없이 tools만 있을 경우, work 앵커로 오른쪽 pane 생성
+  # NOTE: work surfaces가 없으면 split 후 원래 pane이 비게 되므로 건너뜁니다
+  echo "→ 도구 그룹 오른쪽 pane으로 이동..."
+  ANCHOR="${WORK_SURFACES[1]}"  # zsh: 1-indexed; work가 보장되어 비지 않음
+
+  BEFORE=$(cmux list-panes --workspace "$WORKSPACE" 2>/dev/null | grep -oE "pane:[0-9]+" | sort)
+  SPLIT_OUT=$(cmux new-split right --workspace "$WORKSPACE" --surface "$ANCHOR" 2>/dev/null)
+  AUTO_SURFACE=$(echo "$SPLIT_OUT" | grep -oE "surface:[0-9]+" || true)
+  AFTER=$(cmux list-panes --workspace "$WORKSPACE" 2>/dev/null | grep -oE "pane:[0-9]+" | sort)
+  TOOLS_PANE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -1)
+
+  for surf in "${TOOLS_SURFACES[@]}"; do
+    ERR=$(cmux move-surface --surface "$surf" --pane "$TOOLS_PANE" 2>&1) && \
+      echo "  이동: $surf → $TOOLS_PANE (도구)" || \
+      echo "  Warning: $surf 이동 실패 — $ERR"
+  done
+
+  [[ -n "$AUTO_SURFACE" ]] && cmux close-surface --surface "$AUTO_SURFACE" --workspace "$WORKSPACE" 2>/dev/null || true
+elif [[ ${#TOOLS_SURFACES[@]} -gt 0 ]]; then
+  echo "  Info: work 그룹이 없어 도구 그룹 분리를 건너뜁니다 (원래 pane이 비게 됨)."
+fi
+
+echo ""
+echo "=== 완료 ==="
+cmux tree --workspace "$WORKSPACE" 2>/dev/null || true

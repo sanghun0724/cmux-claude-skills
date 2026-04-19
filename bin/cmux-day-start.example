@@ -1,0 +1,67 @@
+#!/bin/zsh
+# cmux-day-start: 하루 시작 시 모든 워크스페이스 자동 생성
+# 사용법: cmux-day-start
+# 이미 존재하는 워크스페이스는 건너뜁니다
+#
+# ────────────────────────────────────────────────────────────
+# 이 파일은 예시 템플릿입니다. 복사해서 본인의 프로젝트 경로로
+# 수정한 뒤 ~/.local/bin/cmux-day-start 로 저장하세요.
+# ────────────────────────────────────────────────────────────
+
+set -euo pipefail
+
+if ! command -v cmux &>/dev/null; then
+  echo "Error: cmux CLI를 찾을 수 없습니다."
+  exit 1
+fi
+
+# ── 사용자 설정 (여기를 수정하세요) ───────────────────────
+# 프로젝트 루트 디렉토리
+PROJECTS_ROOT="$HOME/projects"
+
+# 각 워크스페이스: (이름 디렉토리 레이아웃-커맨드)
+# 레이아웃 커맨드: cmux-ios, cmux-n8n, cmux-data, cmux-skills, cmux-web
+# ──────────────────────────────────────────────────────────
+
+workspace_exists() {
+  cmux list-workspaces 2>/dev/null | grep -qE "[[:space:]]${1}([[:space:]]|$)"
+}
+
+create_ws() {
+  local name=$1
+  local dir=$2
+  local cmd=$3
+
+  if workspace_exists "$name"; then
+    echo "✓ '$name' 이미 존재, 건너뜀"
+    return
+  fi
+
+  if [[ ! -d "$dir" ]]; then
+    echo "Warning: 디렉토리 없음, 건너뜀 → $dir"
+    return
+  fi
+
+  echo "→ '$name' 생성 중..."
+  local REF
+  REF=$(cmux new-workspace --cwd "$dir" --command "$cmd" | grep -oE "workspace:[0-9]+" | head -1 || true)
+  sleep 0.4
+  [[ -n "$REF" ]] && cmux rename-workspace --workspace "$REF" "$name" 2>/dev/null && echo "  완료: $name"
+}
+
+echo "==============================="
+echo "  cmux day-start"
+echo "==============================="
+
+# 예시 워크스페이스 — 본인 프로젝트에 맞게 수정하세요
+create_ws "ios-app"      "$PROJECTS_ROOT/ios-app"      "cmux-ios \"$PROJECTS_ROOT/ios-app\" && claude"
+create_ws "api-server"   "$PROJECTS_ROOT/api-server"   "cmux-web \"$PROJECTS_ROOT/api-server\" \"npm run dev\" && claude"
+create_ws "data-science" "$PROJECTS_ROOT/data"          "cmux-data && claude"
+create_ws "my-skills"    "$HOME/.claude"                "cmux-skills && claude"
+create_ws "automation"   "$PROJECTS_ROOT/automation"    "cmux-n8n && claude"
+
+echo ""
+echo "==============================="
+cmux list-workspaces
+echo "==============================="
+echo "day-start 완료!"

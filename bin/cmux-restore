@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""cmux-restore: 스냅샷에서 cmux 레이아웃 + Claude 세션 복원
+사용법: cmux-restore [snapshot-name-or-path]
+       인자 없으면 최신 스냅샷 사용
+
+환경변수:
+  CMUX_RESTORE_DELAY  각 cmux 명령 사이 대기 시간(초). 기본 0.3.
+                      느린 머신에서 실패 시 1.0 이상으로 늘려보세요.
+"""
+
+import json
+import os
+import re
+import sys
+import subprocess
+import time
+from pathlib import Path
+
+SNAPSHOT_DIR = Path.home() / ".cmux-snapshots"
+RESTORE_DELAY = float(os.environ.get("CMUX_RESTORE_DELAY", "0.3"))
+
+# 허용 패턴: cmux가 반환하는 ref 토큰 (workspace:N, pane:N, surface:N)
+_REF_RE = re.compile(r"^(workspace|pane|surface):\d+$")
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
+
+
+def _validate_ref(value: str, label: str) -> str:
+    """cmux ref 토큰을 검증합니다 (workspace:N, pane:N, surface:N)."""
+    if not _REF_RE.match(value):
+        raise ValueError(f"unexpected {label} format: {value!r}")
+    return value
+
+
+def run(argv: list[str]) -> str:
+    """shell=False로 cmux 명령 실행 — shell injection 없음."""
+    r = subprocess.run(argv, capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def panes_now(ws_ref: str) -> set[str]:
+    out = run(["cmux", "list-panes", "--workspace", ws_ref])
+    return {tok for line in out.splitlines() for tok in line.split() if tok.startswith("pane:")}
+
+
+def extract_ref(output: str, prefix: str) -> str | None:
+    for tok in output.split():
+        if tok.startswith(f"{prefix}:") and _REF_RE.match(tok):
+            return tok
+    return None
+
+
+def configure_surface(surf_ref: str, ws_ref: str, surface_data: dict) -> None:
+    """surface에 cd + claude 세션 복원 명령 전송."""
+    d = surface_data.get("dir", "")
+    is_claude = surface_data.get("is_claude", False)
+    session_id = surface_data.get("session_id")
+    title = surface_data.get("title", "")
+
+    if d:
+        # shlex 없이 argv 리스트로 전달 — 경로에 공백/특수문자 있어도 안전
+        run(["cmux", "send", "--workspace", ws_ref, "--surface", surf_ref, f"cd {_shell_quote(d)}\n"])
+        time.sleep(RESTORE_DELAY / 3)
+
+    if is_claude:
+        if session_id and _SESSION_ID_RE.match(session_id):
+            run(["cmux", "send", "--workspace", ws_ref, "--surface", surf_ref,
+                 f"claude --resume {session_id}\n"])
+        else:
+            run(["cmux", "send", "--workspace", ws_ref, "--surface", surf_ref, "claude -c\n"])
+        time.sleep(RESTORE_DELAY)
+        status = "ID매칭" if (session_id and _SESSION_ID_RE.match(session_id)) else "최근세션"
+        print(f"    Claude 복원 ({status}): {title[:40]}")
+    else:
+        print(f"    {title[:40]}")
+
+
+def _shell_quote(s: str) -> str:
+    """POSIX sh 안전 따옴표 — shlex.quote 동등."""
+    import shlex
+    return shlex.quote(s)
+
+
+def restore_node(node: dict, ws_ref: str, pane_ref: str, surf_ref: str) -> None:
+    """재귀적으로 레이아웃 트리를 복원합니다."""
+    if node["type"] == "pane":
+        surfaces = node.get("surfaces", [])
+        if not surfaces:
+            return
+        configure_surface(surf_ref, ws_ref, surfaces[0])
+        for surf_data in surfaces[1:]:
+            out = run(["cmux", "new-surface", "--pane", pane_ref, "--workspace", ws_ref])
+            new_surf = extract_ref(out, "surface")
+            if new_surf:
+                configure_surface(new_surf, ws_ref, surf_data)
+
+    elif node["type"] == "split":
+        direction = "right" if node.get("orientation", "horizontal") == "horizontal" else "down"
+
+        before = panes_now(ws_ref)
+        out = run(["cmux", "new-split", direction, "--workspace", ws_ref, "--surface", surf_ref])
+        time.sleep(RESTORE_DELAY)
+        after = panes_now(ws_ref)
+
+        new_pane_set = after - before
+        if len(new_pane_set) != 1:
+            print(f"  Warning: split 후 새 pane 감지 실패 (got {len(new_pane_set)})")
+        new_pane = next(iter(new_pane_set), None)
+        new_surf = extract_ref(out, "surface")
+
+        restore_node(node["first"], ws_ref, pane_ref, surf_ref)
+        if new_pane and new_surf:
+            restore_node(node["second"], ws_ref, new_pane, new_surf)
+
+    elif node["type"] == "unknown":
+        print("  Warning: 알 수 없는 node type, 건너뜁니다.")
+
+
+def restore_workspace(ws_data: dict) -> None:
+    name = ws_data.get("name", "unnamed")
+    cwd = ws_data.get("cwd") or str(Path.home())
+
+    # 이름/경로 기본 검증
+    if not isinstance(name, str) or any(ord(c) < 0x20 for c in name):
+        print(f"  Warning: 잘못된 workspace 이름, 건너뜁니다: {name!r}")
+        return
+    if not isinstance(cwd, str) or any(ord(c) < 0x20 for c in cwd):
+        print(f"  Warning: 잘못된 cwd, 건너뜁니다")
+        return
+
+    print(f"\n→ '{name}' 복원 중... ({cwd})")
+    out = run(["cmux", "new-workspace", "--cwd", cwd])
+    ws_ref = extract_ref(out, "workspace")
+    if not ws_ref:
+        print("  ✗ workspace 생성 실패")
+        return
+
+    time.sleep(RESTORE_DELAY * 1.5)
+    run(["cmux", "rename-workspace", "--workspace", ws_ref, name])
+
+    panes_out = run(["cmux", "list-panes", "--workspace", ws_ref])
+    first_pane = next(
+        (tok for line in panes_out.splitlines() for tok in line.split() if tok.startswith("pane:")),
+        None,
+    )
+    if not first_pane:
+        print("  ✗ 초기 pane 파악 실패")
+        return
+
+    surfs_out = run(["cmux", "list-pane-surfaces", "--workspace", ws_ref, "--pane", first_pane])
+    first_surf = next(
+        (tok for line in surfs_out.splitlines() for tok in line.split() if tok.startswith("surface:")),
+        None,
+    )
+    if not first_surf:
+        print("  ✗ 초기 surface 파악 실패")
+        return
+
+    try:
+        restore_node(ws_data["layout"], ws_ref, first_pane, first_surf)
+    except Exception as e:
+        print(f"  ✗ 복원 중 오류: {e}")
+        return
+    print(f"  ✓ '{name}' 완료")
+
+
+def _cmux_available() -> bool:
+    r = subprocess.run(["command", "-v", "cmux"], shell=False, capture_output=True)
+    # 'command -v' needs shell on some systems; use which instead
+    r2 = subprocess.run(["which", "cmux"], capture_output=True)
+    return r2.returncode == 0
+
+
+def main() -> None:
+    if not _cmux_available():
+        print("Error: cmux CLI를 찾을 수 없습니다. cmux.app이 설치되어 있는지 확인하세요.")
+        sys.exit(1)
+
+    if len(sys.argv) > 1:
+        arg = sys.argv[1]
+        # path traversal 방지: 슬래시가 있으면 Path로 처리, 없으면 이름 검증
+        if "/" in arg:
+            path = Path(arg)
+        else:
+            if not re.fullmatch(r"[A-Za-z0-9._\-]+", arg):
+                print(f"Error: 스냅샷 이름에 허용되지 않는 문자가 있습니다: {arg!r}")
+                sys.exit(1)
+            path = SNAPSHOT_DIR / f"{arg}.json"
+    else:
+        snapshots = sorted(SNAPSHOT_DIR.glob("*.json"))
+        if not snapshots:
+            print("스냅샷이 없습니다. 먼저 cmux-snapshot을 실행하세요.")
+            sys.exit(1)
+        path = snapshots[-1]
+        print(f"최신 스냅샷 사용: {path.name}")
+
+    if not path.exists():
+        print(f"Error: 스냅샷 파일을 찾을 수 없습니다: {path}")
+        sys.exit(1)
+
+    try:
+        with open(path) as f:
+            snapshot = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Error: 스냅샷 파싱 실패: {e}")
+        sys.exit(1)
+
+    print(f"=== cmux-restore: {snapshot['name']} ({snapshot['timestamp'][:10]}) ===")
+    print(f"워크스페이스 {len(snapshot['workspaces'])}개 복원 시작...")
+    print(f"(대기 시간: {RESTORE_DELAY}s, CMUX_RESTORE_DELAY 환경변수로 조정 가능)")
+
+    for ws in snapshot["workspaces"]:
+        restore_workspace(ws)
+
+    print("\n=== 복원 완료 ===")
+    print(run(["cmux", "list-workspaces"]))
+
+
+if __name__ == "__main__":
+    main()

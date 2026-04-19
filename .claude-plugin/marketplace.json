@@ -1,0 +1,7 @@
+{
+  "name": "cmux-claude-skills",
+  "description": "cmux terminal automation skills for Claude Code",
+  "plugins": [
+    { "path": ".", "name": "cmux-kit" }
+  ]
+}

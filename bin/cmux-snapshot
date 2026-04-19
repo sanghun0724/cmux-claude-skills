@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""cmux-snapshot: 현재 cmux 레이아웃 + Claude 세션 ID를 JSON 스냅샷으로 저장
+사용법: cmux-snapshot [snapshot-name]
+  snapshot-name 기본값: "latest" (항상 덮어씀)
+
+환경 요구사항:
+  - macOS + cmux.app 설치
+  - Claude Code CLI 사용 시 ~/.claude/projects/ 에 세션 인덱스 존재
+"""
+
+import json
+import sys
+import re
+from datetime import datetime
+from pathlib import Path
+
+SESSION_JSON = Path.home() / "Library/Application Support/cmux/session-com.cmuxterm.app.json"
+SNAPSHOT_DIR = Path.home() / ".cmux-snapshots"
+CLAUDE_PROJECTS = Path.home() / ".claude/projects"
+
+
+def find_session_id(surface_title: str, cwd: str) -> str | None:
+    """surface 제목 + CWD로 가장 일치하는 Claude 세션 ID 탐색
+    1순위: CWD 프로젝트 내 매칭
+    2순위: 전체 프로젝트에서 제목 매칭
+    """
+    clean = re.sub(r"^[✳⠂⠐\s]+", "", surface_title).strip()
+    if not clean:
+        return None
+
+    clean_lower = clean.lower()
+
+    def score_entry(e):
+        summary = e.get("summary", "").lower()
+        first = e.get("firstPrompt", "").lower()
+        if clean_lower in summary or summary in clean_lower:
+            return 3
+        if clean_lower in first:
+            return 2
+        if any(w in summary for w in clean_lower.split() if len(w) > 2):
+            return 1
+        return 0
+
+    def search_index(index_path):
+        if not index_path.exists():
+            return None
+        try:
+            with open(index_path) as f:
+                entries = json.load(f).get("entries", [])
+        except (json.JSONDecodeError, OSError):
+            return None
+        if not entries:
+            return None
+        scored = sorted(
+            entries,
+            key=lambda e: (score_entry(e), e.get("modified", "")),
+            reverse=True,
+        )
+        best = scored[0]
+        return best["sessionId"] if score_entry(best) > 0 else None
+
+    # 1순위: CWD 기반 프로젝트
+    if cwd:
+        project_key = "-" + cwd.replace("/", "-").lstrip("-")
+        result = search_index(CLAUDE_PROJECTS / project_key / "sessions-index.json")
+        if result:
+            return result
+
+    # 2순위: 전체 프로젝트 검색
+    all_entries = []
+    for index_path in CLAUDE_PROJECTS.glob("*/sessions-index.json"):
+        try:
+            with open(index_path) as f:
+                entries = json.load(f).get("entries", [])
+            all_entries.extend(entries)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    if not all_entries:
+        return None
+
+    scored = sorted(
+        all_entries,
+        key=lambda e: (score_entry(e), e.get("modified", "")),
+        reverse=True,
+    )
+    best = scored[0]
+    return best["sessionId"] if score_entry(best) > 0 else None
+
+
+def build_layout(node, panels_by_id):
+    node_type = node.get("type")
+
+    if node_type == "pane":
+        surfaces = []
+        for pid in node["pane"].get("panelIds", []):
+            p = panels_by_id.get(pid)
+            if not p:
+                continue
+            title = p.get("title", "")
+            is_claude = any(c in title for c in ["✳", "⠂", "⠐"])
+            cwd = p.get("directory") or p.get("terminal", {}).get("workingDirectory", "")
+            session_id = find_session_id(title, cwd) if is_claude else None
+            surfaces.append(
+                {
+                    "title": title,
+                    "dir": cwd,
+                    "is_claude": is_claude,
+                    "session_id": session_id,
+                }
+            )
+        return {"type": "pane", "surfaces": surfaces}
+
+    elif node_type == "split":
+        s = node["split"]
+        return {
+            "type": "split",
+            "orientation": s.get("orientation", "horizontal"),
+            "ratio": round(s.get("dividerPosition", 0.5), 3),
+            "first": build_layout(s["first"], panels_by_id),
+            "second": build_layout(s["second"], panels_by_id),
+        }
+
+    return {"type": "unknown"}
+
+
+def count(node, what):
+    if node["type"] == "pane":
+        return 1 if what == "panes" else len(node.get("surfaces", []))
+    if node["type"] == "split":
+        return count(node["first"], what) + count(node["second"], what)
+    return 0  # "unknown" 노드는 0으로 처리
+
+
+def main():
+    raw_name = sys.argv[1] if len(sys.argv) > 1 else "latest"
+    # path traversal 방지: 파일명만 허용
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z0-9._\-]+", raw_name):
+        print(f"Error: 스냅샷 이름에 허용되지 않는 문자가 있습니다: {raw_name!r}")
+        sys.exit(1)
+    name = raw_name
+    SNAPSHOT_DIR.mkdir(exist_ok=True)
+    out = SNAPSHOT_DIR / f"{name}.json"
+
+    if not SESSION_JSON.exists():
+        print(f"Error: cmux 세션 파일을 찾을 수 없습니다: {SESSION_JSON}")
+        print("cmux.app이 실행 중인지 확인하세요.")
+        sys.exit(1)
+
+    try:
+        with open(SESSION_JSON) as f:
+            session = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Error: 세션 파일 파싱 실패: {e}")
+        sys.exit(1)
+
+    snapshot = {
+        "version": 2,
+        "timestamp": datetime.now().isoformat(),
+        "name": name,
+        "workspaces": [],
+    }
+
+    for window in session.get("windows", []):
+        for ws in window.get("tabManager", {}).get("workspaces", []):
+            ws_name = ws.get("customTitle") or ws.get("processTitle", "unnamed")
+            ws_cwd = ws.get("currentDirectory", "")
+            panels_by_id = {p["id"]: p for p in ws.get("panels", [])}
+            layout = build_layout(
+                ws.get("layout", {"type": "pane", "pane": {"panelIds": []}}),
+                panels_by_id,
+            )
+            snapshot["workspaces"].append(
+                {"name": ws_name, "cwd": ws_cwd, "layout": layout}
+            )
+
+    with open(out, "w") as f:
+        json.dump(snapshot, f, ensure_ascii=False, indent=2)
+
+    print(f"✓ 스냅샷 저장: {out}")
+    for ws in snapshot["workspaces"]:
+        panes = count(ws["layout"], "panes")
+        surfs = count(ws["layout"], "surfaces")
+
+        def claude_count(node):
+            if node["type"] == "pane":
+                return sum(1 for s in node["surfaces"] if s["is_claude"])
+            return claude_count(node["first"]) + claude_count(node["second"])
+
+        def session_count(node):
+            if node["type"] == "pane":
+                return sum(1 for s in node["surfaces"] if s.get("session_id"))
+            return session_count(node["first"]) + session_count(node["second"])
+
+        claudes = claude_count(ws["layout"])
+        sessions = session_count(ws["layout"])
+        extra = f", Claude {claudes}개 (세션ID 매칭 {sessions}개)" if claudes else ""
+        print(f"  {ws['name']}: {panes} panes, {surfs} surfaces{extra}")
+
+
+if __name__ == "__main__":
+    main()
