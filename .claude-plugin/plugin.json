@@ -3,7 +3,6 @@
   "version": "0.1.0",
   "description": "cmux terminal automation skills for Claude Code — workspace layouts, session snapshot/restore, surface organizer, and more.",
   "author": { "name": "sanghun0724", "url": "https://github.com/sanghun0724" },
-  "skills": "../skills",
   "homepage": "https://github.com/sanghun0724/cmux-claude-skills",
   "repository": "https://github.com/sanghun0724/cmux-claude-skills",
   "license": "MIT",
