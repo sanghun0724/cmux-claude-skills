@@ -1,7 +1,8 @@
 {
   "name": "cmux-claude-skills",
   "description": "cmux terminal automation skills for Claude Code",
+  "owner": { "name": "sanghun0724" },
   "plugins": [
-    { "path": ".", "name": "cmux-kit" }
+    { "name": "cmux-kit", "source": "./", "description": "cmux snapshot/restore/organize/preview/web skills" }
   ]
 }
