@@ -22,8 +22,8 @@ cmux-web {{ARGUMENTS}}
 ```
 
 인자 예시:
-- `cmux-web` → 현재 디렉토리, `flew dev` 실행
-- `cmux-web ~/myproject` → `~/myproject` 디렉토리, `flew dev` 실행
+- `cmux-web` → 현재 디렉토리, `npm run dev` 실행
+- `cmux-web ~/myproject` → `~/myproject` 디렉토리, `npm run dev` 실행
 - `cmux-web ~/myproject "npm run dev"` → 커스텀 dev 커맨드
 
 ## 조건

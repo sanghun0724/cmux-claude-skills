@@ -23,7 +23,7 @@ fi
 #   CMUX_RESEARCH_KEYWORDS="리서치|research|deep.dive|survey"
 #   CMUX_TOOLS_KEYWORDS="skill|plugin|hook|claude"
 _RESEARCH_PAT="${CMUX_RESEARCH_KEYWORDS:-리서치|research|deep.dive|지식|저장소|survey|분석|조사}"
-_TOOLS_PAT="${CMUX_TOOLS_KEYWORDS:-skill|스킬|rule|obsidian|kaizen|consistency|hook|plugin|setup|도구|n8n|claude|hud|memory}"
+_TOOLS_PAT="${CMUX_TOOLS_KEYWORDS:-skill|스킬|rule|obsidian|consistency|hook|plugin|setup|도구|n8n|claude|hud|memory}"
 
 classify_surface() {
   local title

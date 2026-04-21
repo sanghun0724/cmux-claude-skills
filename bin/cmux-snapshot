@@ -141,8 +141,7 @@ def count(node, what):
 def main():
     raw_name = sys.argv[1] if len(sys.argv) > 1 else "latest"
     # path traversal 방지: 파일명만 허용
-    import re as _re
-    if not _re.fullmatch(r"[A-Za-z0-9._\-]+", raw_name):
+    if not re.fullmatch(r"[A-Za-z0-9._\-]+", raw_name):
         print(f"Error: 스냅샷 이름에 허용되지 않는 문자가 있습니다: {raw_name!r}")
         sys.exit(1)
     name = raw_name

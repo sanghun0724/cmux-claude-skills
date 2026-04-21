@@ -164,10 +164,8 @@ def restore_workspace(ws_data: dict) -> None:
 
 
 def _cmux_available() -> bool:
-    r = subprocess.run(["command", "-v", "cmux"], shell=False, capture_output=True)
-    # 'command -v' needs shell on some systems; use which instead
-    r2 = subprocess.run(["which", "cmux"], capture_output=True)
-    return r2.returncode == 0
+    r = subprocess.run(["which", "cmux"], capture_output=True)
+    return r.returncode == 0
 
 
 def main() -> None:

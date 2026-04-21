@@ -51,7 +51,7 @@ cmux list-pane-surfaces --workspace $WORKSPACE --pane $FIRST_PANE
 분류 결과를 사용자에게 표로 보여주고 확인을 받습니다:
 
 ```
-surface:1  [work]     "hoian-ios 빌드 디버깅"
+surface:1  [work]     "my-app 빌드 디버깅"
 surface:2  [research] "SwiftUI 레이아웃 레퍼런스"
 surface:3  [tools]    "cmux 스킬 개발"
 surface:4  [work]     "PR 리뷰"
