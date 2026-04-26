@@ -66,6 +66,8 @@ $EDITOR ~/.local/bin/cmux-day-start  # edit PROJECTS_ROOT and workspace list
 | `/cmux-kit:organize` | **AI-powered** classifier — Claude reads surfaces and classifies by context | `/cmux-kit:organize` |
 | `cmux-snapshot [name]` | Save current layout + Claude session snapshot | `/cmux-kit:snapshot` |
 | `cmux-restore [name]` | Restore layout + Claude sessions from snapshot | `/cmux-kit:restore` |
+| `cmux-snapshot-track` | Claude `SessionStart` hook — append panel↔session mapping | — |
+| `cmux-claude-resume-all` | Auto-resume Claude in every panel after cmux restart | — |
 | `cmux-preview <file.md>` | Live Markdown side-panel preview | `/cmux-kit:preview` |
 | `cmux-day-start` | Create all workspaces at day start | `/cmux-kit:day-start` |
 | `cmux-skills [dir]` | Claude skill dev + file nav layout | `/cmux-kit:layout-skills` |
@@ -137,8 +139,58 @@ cmux-restore mywork   # use ~/.cmux-snapshots/mywork.json
 CMUX_RESTORE_DELAY=1.0 cmux-restore
 ```
 
-> **Limitations:** Session ID matching is fuzzy (surface title vs `~/.claude/projects/` index).  
 > Snapshot reads cmux's internal session JSON — may break on cmux updates.
+
+### Self-healing session mapping
+
+`cmux-snapshot` would previously fall back to fuzzy matching on the
+`sessions-index.json` file, which goes stale whenever Claude Code resumes a
+session into a fresh `*.jsonl`. The result: `cmux-restore` would launch
+`claude --resume <stale-id>` and the conversation would not be found.
+
+The new pipeline removes that risk in three layers:
+
+1. **Live capture** — at snapshot time, `cmux-snapshot` reads `ps -eo
+   pid,command` and `ps -E -p <pid>` to extract `--session-id <UUID>` plus
+   `CMUX_SURFACE_ID`. Live Claude processes get a 100% accurate panel↔session
+   mapping with no fuzzy matching.
+2. **Persistent log** — `cmux-snapshot-track` is a tiny `SessionStart` hook
+   that appends `{ts, panel, session, cwd, ws}` to
+   `~/.cmux-snapshots/session-map.jsonl` every time Claude Code starts. Even
+   panels whose `claude` process has since exited stay reachable.
+3. **Stale-aware restore** — `cmux-restore` validates `full_path` exists and,
+   if not, re-resolves via the saved `first_prompt` snippet against the live
+   `*.jsonl` files in the project directory. Only when every layer fails does
+   it fall back to `claude -c`.
+
+Register the hook once in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "cmux-snapshot-track" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+After cmux restarts and `cmux-restore` rebuilds the layout, you can
+auto-resume every Claude panel in one shot:
+
+```bash
+cmux-claude-resume-all            # send `claude --resume <sid>` to each panel
+cmux-claude-resume-all --dry-run  # preview without sending
+```
+
+Snapshot files now carry two extra fields per surface — `full_path` and
+`first_prompt` — used by the restore decision tree. Older snapshots remain
+compatible: missing fields fall back to the legacy resume path.
 
 ---
 

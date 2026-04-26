@@ -6,11 +6,17 @@
 환경 요구사항:
   - macOS + cmux.app 설치
   - Claude Code CLI 사용 시 ~/.claude/projects/ 에 세션 인덱스 존재
+
+세션 ID 매핑 우선순위 (self-healing):
+  1. 살아있는 claude 프로세스의 --session-id + CMUX_SURFACE_ID env (정확도 100%)
+  2. ~/.cmux-snapshots/session-map.jsonl (SessionStart hook 영구 적립, 죽은 세션 포함)
+  3. fuzzy fallback — sessions-index.json + jsonl 직접 스캔 (제목/프롬프트 매칭)
 """
 
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -24,74 +30,236 @@ SESSION_JSON = Path(
 SNAPSHOT_DIR = Path(os.environ.get("CMUX_SNAPSHOT_DIR", str(Path.home() / ".cmux-snapshots")))
 CLAUDE_PROJECTS = Path(os.environ.get("CMUX_CLAUDE_PROJECTS", str(Path.home() / ".claude/projects")))
 
+UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
-def find_session_id(surface_title: str, cwd: str) -> str | None:
-    """surface 제목 + CWD로 가장 일치하는 Claude 세션 ID 탐색
-    1순위: CWD 프로젝트 내 매칭
-    2순위: 전체 프로젝트에서 제목 매칭
+# {panel_uuid_upper: claude_session_id} — main()에서 채워짐
+LIVE_SESSIONS: dict = {}
+
+
+def discover_persisted_sessions() -> dict:
+    """session-map.jsonl에서 panel UUID -> session ID 영구 매핑을 읽습니다.
+
+    Hook(cmux-snapshot-track)으로 적립된 영구 매핑. 죽은 세션도 추적 가능.
+    같은 panel에 여러 매핑이 있으면 가장 최근 ts 우선.
+    returns: {panel_uuid_upper: session_id}
     """
-    clean = re.sub(r"^[✳⠂⠐\s]+", "", surface_title).strip()
-    if not clean:
-        return None
+    log = SNAPSHOT_DIR / "session-map.jsonl"
+    if not log.exists():
+        return {}
+    latest: dict = {}  # panel -> (ts, sid)
+    try:
+        with open(log) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                p = r.get("panel")
+                s = r.get("session")
+                ts = r.get("ts", "")
+                if not (p and s):
+                    continue
+                cur = latest.get(p)
+                if not cur or ts > cur[0]:
+                    latest[p] = (ts, s)
+    except OSError:
+        return {}
+    return {p.upper(): v[1] for p, v in latest.items()}
 
-    clean_lower = clean.lower()
 
-    def score_entry(e):
-        summary = e.get("summary", "").lower()
-        first = e.get("firstPrompt", "").lower()
-        if clean_lower in summary or summary in clean_lower:
-            return 3
-        if clean_lower in first:
-            return 2
-        if any(w in summary for w in clean_lower.split() if len(w) > 2):
-            return 1
-        return 0
+def discover_live_sessions() -> dict:
+    """ps 기반으로 살아있는 claude 프로세스의 panel UUID -> session ID 매핑을 추출합니다.
 
-    def search_index(index_path):
-        if not index_path.exists():
-            return None
+    `ps -eo pid,command`로 `--session-id <UUID>` 추출 + `ps -E -p <pid>`로
+    CMUX_SURFACE_ID 환경변수 추출 → panel UUID와 sessionId의 100% 정확한 매핑.
+    returns: {panel_uuid_upper: session_id}
+    """
+    mapping: dict = {}
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "pid,command"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except (subprocess.SubprocessError, OSError):
+        return mapping
+
+    for line in out.splitlines():
+        m = re.search(r"--session-id\s+(" + UUID_RE.pattern + r")", line)
+        if not m:
+            continue
+        sid = m.group(1).lower()
+        toks = line.strip().split()
+        if not toks:
+            continue
+        pid = toks[0]
+        if not pid.isdigit():
+            continue
         try:
-            with open(index_path) as f:
-                entries = json.load(f).get("entries", [])
-        except (json.JSONDecodeError, OSError):
-            return None
-        if not entries:
-            return None
-        scored = sorted(
-            entries,
-            key=lambda e: (score_entry(e), e.get("modified", "")),
-            reverse=True,
+            env = subprocess.run(
+                ["ps", "-E", "-p", pid],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            ).stdout
+        except (subprocess.SubprocessError, OSError):
+            continue
+        sm = re.search(r"CMUX_SURFACE_ID=(" + UUID_RE.pattern + r")", env)
+        if sm:
+            mapping[sm.group(1).upper()] = sid
+    return mapping
+
+
+def project_dir_for(cwd: str) -> Path | None:
+    """cwd → ~/.claude/projects 키 (모든 non-alphanumeric을 '-'로 치환).
+
+    예: '/Users/brady/Library/Mobile Documents/iCloud~md~obsidian/...'
+        → '-Users-brady-Library-Mobile-Documents-iCloud-md-obsidian-...'
+    실제로 존재하는 경우에만 Path 반환.
+    """
+    if not cwd:
+        return None
+    key = re.sub(r"[^A-Za-z0-9]+", "-", cwd)
+    if not key.startswith("-"):
+        key = "-" + key
+    p = CLAUDE_PROJECTS / key
+    return p if p.exists() else None
+
+
+def extract_first_prompt(jsonl_path: Path) -> str | None:
+    """jsonl에서 첫 user 텍스트 메시지 추출 (slash 명령이나 <tag>로 시작하는 것은 제외)."""
+    try:
+        with open(jsonl_path) as f:
+            for line in f:
+                try:
+                    o = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if o.get("type") != "user":
+                    continue
+                msg = o.get("message", {}).get("content", "")
+                if isinstance(msg, list):
+                    for c in msg:
+                        if isinstance(c, dict) and c.get("type") == "text":
+                            msg = c.get("text", "")
+                            break
+                    else:
+                        continue
+                if isinstance(msg, str) and msg and not msg.lstrip().startswith("<"):
+                    return msg.strip()
+    except OSError:
+        return None
+    return None
+
+
+def _score_text(title_lower: str, text: str) -> int:
+    text = (text or "").lower()
+    if not text:
+        return 0
+    if title_lower in text or text in title_lower:
+        return 3
+    if any(w in text for w in title_lower.split() if len(w) > 2):
+        return 1
+    return 0
+
+
+def _find_in_index(index_path: Path, title_lower: str) -> tuple[str | None, str | None, str | None]:
+    """sessions-index.json에서 매칭. fullPath가 실존하는 후보만 반환."""
+    if not index_path.exists():
+        return None, None, None
+    try:
+        with open(index_path) as f:
+            entries = json.load(f).get("entries", [])
+    except (json.JSONDecodeError, OSError):
+        return None, None, None
+
+    def s(e):
+        return max(
+            _score_text(title_lower, e.get("summary", "")),
+            _score_text(title_lower, e.get("firstPrompt", "")),
         )
-        best = scored[0]
-        return best["sessionId"] if score_entry(best) > 0 else None
 
-    # 1순위: CWD 기반 프로젝트
-    if cwd:
-        project_key = "-" + cwd.replace("/", "-").lstrip("-")
-        result = search_index(CLAUDE_PROJECTS / project_key / "sessions-index.json")
-        if result:
-            return result
+    candidates = [e for e in entries if Path(e.get("fullPath", "")).exists()]
+    if not candidates:
+        return None, None, None
+    candidates.sort(key=lambda e: (s(e), e.get("modified", "")), reverse=True)
+    best = candidates[0]
+    if s(best) <= 0:
+        return None, None, None
+    return best["sessionId"], best.get("fullPath"), (best.get("firstPrompt") or "")[:120]
 
-    # 2순위: 전체 프로젝트 검색
-    all_entries = []
+
+def _find_in_files(project_dir: Path, title_lower: str) -> tuple[str | None, str | None, str | None]:
+    """*.jsonl 직접 스캔으로 매칭 (인덱스 stale 대비 fallback)."""
+    if not project_dir or not project_dir.exists():
+        return None, None, None
+    files = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    best: tuple[int, float, Path | None] = (0, 0.0, None)
+    prompts: dict[Path, str] = {}
+    for fp in files:
+        prompt = extract_first_prompt(fp) or ""
+        prompts[fp] = prompt
+        sc = _score_text(title_lower, prompt)
+        if sc > best[0] or (sc == best[0] and fp.stat().st_mtime > best[1]):
+            if sc > 0:
+                best = (sc, fp.stat().st_mtime, fp)
+    if not best[2]:
+        return None, None, None
+    chosen = best[2]
+    return chosen.stem, str(chosen), (prompts.get(chosen, "") or "")[:120]
+
+
+def find_session(surface_title: str, cwd: str) -> tuple[str | None, str | None, str | None]:
+    """surface 제목 + CWD로 (session_id, full_path, first_prompt) 탐색.
+
+    1순위: CWD 프로젝트의 sessions-index.json — fullPath 존재 검증
+    2순위: CWD 프로젝트의 *.jsonl 직접 스캔 (mtime 내림차순, prompt 매칭)
+    3순위: 전체 인덱스 (파일 존재 검증)
+    """
+    clean = re.sub(r"^[✳⠂⠐\s]+", "", surface_title or "").strip()
+    if not clean:
+        return None, None, None
+    title_lower = clean.lower()
+
+    proj = project_dir_for(cwd)
+    if proj:
+        sid, fp, prompt = _find_in_index(proj / "sessions-index.json", title_lower)
+        if sid:
+            return sid, fp, prompt
+        sid, fp, prompt = _find_in_files(proj, title_lower)
+        if sid:
+            return sid, fp, prompt
+
+    best: tuple[int, str, str | None, str | None, str | None] = (0, "", None, None, None)
     for index_path in CLAUDE_PROJECTS.glob("*/sessions-index.json"):
         try:
             with open(index_path) as f:
                 entries = json.load(f).get("entries", [])
-            all_entries.extend(entries)
         except (json.JSONDecodeError, OSError):
             continue
+        for e in entries:
+            if not Path(e.get("fullPath", "")).exists():
+                continue
+            sc = max(
+                _score_text(title_lower, e.get("summary", "")),
+                _score_text(title_lower, e.get("firstPrompt", "")),
+            )
+            if sc <= 0:
+                continue
+            mod = e.get("modified", "")
+            if (sc, mod) > (best[0], best[1]):
+                best = (sc, mod, e["sessionId"], e.get("fullPath"), (e.get("firstPrompt") or "")[:120])
+    if best[2]:
+        return best[2], best[3], best[4]
+    return None, None, None
 
-    if not all_entries:
-        return None
 
-    scored = sorted(
-        all_entries,
-        key=lambda e: (score_entry(e), e.get("modified", "")),
-        reverse=True,
-    )
-    best = scored[0]
-    return best["sessionId"] if score_entry(best) > 0 else None
+# 기존 시그니처와의 호환성 유지를 위한 thin wrapper
+def find_session_id(surface_title: str, cwd: str) -> str | None:
+    """기존 호환: session_id만 반환."""
+    sid, _, _ = find_session(surface_title, cwd)
+    return sid
 
 
 def build_layout(node, panels_by_id):
@@ -106,13 +274,34 @@ def build_layout(node, panels_by_id):
             title = p.get("title", "")
             is_claude = any(c in title for c in ["✳", "⠂", "⠐"])
             cwd = p.get("directory") or p.get("terminal", {}).get("workingDirectory", "")
-            session_id = find_session_id(title, cwd) if is_claude else None
+
+            session_id: str | None = None
+            full_path: str | None = None
+            first_prompt: str | None = None
+
+            # 1순위: live + persisted 매핑 (panel UUID 기반, 100% 정확)
+            mapped_sid = LIVE_SESSIONS.get(pid.upper())
+            if mapped_sid:
+                session_id = mapped_sid
+                proj = project_dir_for(cwd)
+                if proj:
+                    candidate = proj / f"{mapped_sid}.jsonl"
+                    if candidate.exists():
+                        full_path = str(candidate)
+                        first_prompt = (extract_first_prompt(candidate) or "")[:120] or None
+                is_claude = True
+            elif is_claude:
+                # 2순위: fuzzy fallback (죽은 세션이거나 매핑 없을 때)
+                session_id, full_path, first_prompt = find_session(title, cwd)
+
             surfaces.append(
                 {
                     "title": title,
                     "dir": cwd,
                     "is_claude": is_claude,
                     "session_id": session_id,
+                    "full_path": full_path,
+                    "first_prompt": first_prompt,
                 }
             )
         return {"type": "pane", "surfaces": surfaces}
@@ -159,6 +348,13 @@ def main():
     except (json.JSONDecodeError, OSError) as e:
         print(f"Error: 세션 파일 파싱 실패: {e}")
         sys.exit(1)
+
+    global LIVE_SESSIONS
+    persisted = discover_persisted_sessions()  # 영구 매핑 (죽은 세션 포함)
+    live = discover_live_sessions()  # 현재 살아있는 매핑 (정확도 최상)
+    LIVE_SESSIONS = {**persisted, **live}  # live가 우선
+    if live or persisted:
+        print(f"✓ 세션 매핑: live={len(live)} persisted={len(persisted)} total={len(LIVE_SESSIONS)}")
 
     snapshot = {
         "version": 2,

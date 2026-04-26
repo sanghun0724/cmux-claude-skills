@@ -4,8 +4,16 @@
        인자 없으면 최신 스냅샷 사용
 
 환경변수:
-  CMUX_RESTORE_DELAY  각 cmux 명령 사이 대기 시간(초). 기본 0.3.
-                      느린 머신에서 실패 시 1.0 이상으로 늘려보세요.
+  CMUX_SNAPSHOT_DIR     스냅샷 디렉토리. 기본 ~/.cmux-snapshots
+  CMUX_CLAUDE_PROJECTS  Claude projects 디렉토리. 기본 ~/.claude/projects
+  CMUX_RESTORE_DELAY    각 cmux 명령 사이 대기 시간(초). 기본 0.3.
+                        느린 머신에서 실패 시 1.0 이상으로 늘려보세요.
+
+세션 복원 분기 (self-healing):
+  1. snapshot의 session_id + full_path 실존 → claude --resume <sid>
+  2. session_id 있으나 full_path 없음(legacy) → cwd 추정 검증 → resume
+  3. 위 모두 stale + first_prompt 있음 → first_prompt 매칭 재탐색 → 새 sid로 resume
+  4. 모두 실패 → claude -c (최근 세션 폴백)
 """
 
 import json
@@ -17,6 +25,7 @@ import time
 from pathlib import Path
 
 SNAPSHOT_DIR = Path(os.environ.get("CMUX_SNAPSHOT_DIR", str(Path.home() / ".cmux-snapshots")))
+CLAUDE_PROJECTS = Path(os.environ.get("CMUX_CLAUDE_PROJECTS", str(Path.home() / ".claude/projects")))
 RESTORE_DELAY = float(os.environ.get("CMUX_RESTORE_DELAY", "0.3"))
 
 # 허용 패턴: cmux가 반환하는 ref 토큰 (workspace:N, pane:N, surface:N)
@@ -49,11 +58,81 @@ def extract_ref(output: str, prefix: str) -> str | None:
     return None
 
 
+def project_dir_for(cwd: str) -> Path | None:
+    """cwd → ~/.claude/projects 키 (모든 non-alphanumeric을 '-'로 치환). 실존시만 반환."""
+    if not cwd:
+        return None
+    key = re.sub(r"[^A-Za-z0-9]+", "-", cwd)
+    if not key.startswith("-"):
+        key = "-" + key
+    p = CLAUDE_PROJECTS / key
+    return p if p.exists() else None
+
+
+def extract_first_prompt(jsonl_path: Path) -> str:
+    """jsonl 첫 user 텍스트 메시지 추출 (slash 명령/<tag> 시작 제외)."""
+    try:
+        with open(jsonl_path) as f:
+            for line in f:
+                try:
+                    o = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if o.get("type") != "user":
+                    continue
+                msg = o.get("message", {}).get("content", "")
+                if isinstance(msg, list):
+                    for c in msg:
+                        if isinstance(c, dict) and c.get("type") == "text":
+                            msg = c.get("text", "")
+                            break
+                    else:
+                        continue
+                if isinstance(msg, str) and msg and not msg.lstrip().startswith("<"):
+                    return msg.strip()
+    except OSError:
+        pass
+    return ""
+
+
+def reresolve_session(cwd: str, first_prompt: str | None) -> str | None:
+    """첫 user 프롬프트 스니펫과 일치하는 가장 최근 jsonl을 찾아 sessionId 반환.
+
+    스니펫: 첫 80자를 lowercase로 비교. CWD project 내 *.jsonl만 스캔.
+    """
+    proj = project_dir_for(cwd)
+    if not proj or not first_prompt:
+        return None
+    snippet = first_prompt.strip()[:80].lower()
+    if not snippet:
+        return None
+    candidates: list[tuple[float, str]] = []
+    for fp in proj.glob("*.jsonl"):
+        prompt = extract_first_prompt(fp).lower()
+        if not prompt:
+            continue
+        if snippet in prompt or prompt[:80] == snippet:
+            candidates.append((fp.stat().st_mtime, fp.stem))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
 def configure_surface(surf_ref: str, ws_ref: str, surface_data: dict) -> None:
-    """surface에 cd + claude 세션 복원 명령 전송."""
+    """surface에 cd + claude 세션 복원 명령 전송.
+
+    self-healing 분기:
+      1) session_id + full_path 실존 → "ID매칭"
+      2) session_id 있고 full_path 없음(legacy) → cwd 추정 검증 → "ID매칭(legacy)"
+      3) stale + first_prompt → reresolve로 새 sid 매칭 → "재탐색"
+      4) 모두 실패 → claude -c → "최근세션(폴백)"
+    """
     d = surface_data.get("dir", "")
     is_claude = surface_data.get("is_claude", False)
     session_id = surface_data.get("session_id")
+    full_path = surface_data.get("full_path")
+    first_prompt = surface_data.get("first_prompt")
     title = surface_data.get("title", "")
 
     if d:
@@ -62,13 +141,34 @@ def configure_surface(surf_ref: str, ws_ref: str, surface_data: dict) -> None:
         time.sleep(RESTORE_DELAY / 3)
 
     if is_claude:
-        if session_id and _SESSION_ID_RE.match(session_id):
+        status: str | None = None
+
+        # 1) snapshot 직저장된 ID — 파일 실존 시에만 사용
+        if session_id and _SESSION_ID_RE.match(session_id) and full_path and Path(full_path).exists():
+            status = "ID매칭"
+        elif session_id and _SESSION_ID_RE.match(session_id) and not full_path:
+            # 구버전 스냅샷 — fullpath 정보 없으면 cwd로 추정해 검증
+            proj = project_dir_for(d)
+            if proj and (proj / f"{session_id}.jsonl").exists():
+                status = "ID매칭(legacy)"
+            else:
+                session_id = None  # stale, 재탐색으로 진행
+
+        # 2) stale ID → first_prompt 기반 재탐색
+        if not status and first_prompt:
+            new_sid = reresolve_session(d, first_prompt)
+            if new_sid and _SESSION_ID_RE.match(new_sid):
+                session_id = new_sid
+                status = "재탐색"
+
+        if status:
             run(["cmux", "send", "--workspace", ws_ref, "--surface", surf_ref,
                  f"claude --resume {session_id}\n"])
         else:
+            # 3) 최후의 폴백: 디렉토리 기준 최근 세션
             run(["cmux", "send", "--workspace", ws_ref, "--surface", surf_ref, "claude -c\n"])
+            status = "최근세션(폴백)"
         time.sleep(RESTORE_DELAY)
-        status = "ID매칭" if (session_id and _SESSION_ID_RE.match(session_id)) else "최근세션"
         print(f"    Claude 복원 ({status}): {title[:40]}")
     else:
         print(f"    {title[:40]}")

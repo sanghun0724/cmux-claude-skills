@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""cmux-snapshot-track: Claude SessionStart hook
+  → (CMUX_SURFACE_ID, sessionId, cwd, ts) 를 ~/.cmux-snapshots/session-map.jsonl에 append.
+
+cmux 환경에서 Claude Code 세션이 시작될 때마다 panel UUID와 sessionId 매핑을
+영구 적립합니다. 이후 cmux-snapshot이 죽은 세션에 대해서도 정확한 매핑을 사용할 수
+있게 해줍니다.
+
+설치: ~/.claude/settings.json hooks.SessionStart 에 추가:
+  {
+    "hooks": {
+      "SessionStart": [
+        {
+          "matcher": "",
+          "hooks": [
+            { "type": "command", "command": "<install-path>/cmux-snapshot-track" }
+          ]
+        }
+      ]
+    }
+  }
+
+환경변수:
+  CMUX_SNAPSHOT_DIR  스냅샷 디렉토리. 기본 ~/.cmux-snapshots
+"""
+
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+SNAPSHOT_DIR = Path(os.environ.get("CMUX_SNAPSHOT_DIR", str(Path.home() / ".cmux-snapshots")))
+OUT = SNAPSHOT_DIR / "session-map.jsonl"
+
+
+def main() -> None:
+    """모든 엣지 케이스에서 graceful exit 0 — hook이 Claude Code를 막아선 안 됨."""
+    panel = os.environ.get("CMUX_SURFACE_ID")
+    if not panel:
+        return  # cmux 환경 아님 — silent skip
+
+    sid = None
+    try:
+        data = json.load(sys.stdin)
+        sid = data.get("session_id") or data.get("sessionId")
+    except (json.JSONDecodeError, ValueError, OSError):
+        pass
+    if not sid:
+        return  # session_id 없으면 silent skip
+
+    try:
+        SNAPSHOT_DIR.mkdir(exist_ok=True)
+        rec = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "panel": panel,
+            "session": sid,
+            "cwd": os.environ.get("PWD", ""),
+            "ws": os.environ.get("CMUX_WORKSPACE_ID", ""),
+        }
+        with open(OUT, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except OSError:
+        return  # 디스크 오류도 silent skip
+
+
+if __name__ == "__main__":
+    main()
