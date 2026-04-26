@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""cmux-claude-resume-all
+cmux 재시작 후 layout이 복원된 상태에서, 모든 panel에 claude --resume <sid>를 보내
+이전 작업 세션을 자동 복구합니다.
+
+원리:
+  1. cmux session JSON에서 살아있는 모든 panel UUID를 layout 순서대로 수집
+  2. ~/.cmux-snapshots/session-map.jsonl에서 panel UUID → sessionId 매핑 lookup
+  3. cmux list-workspaces / list-panes / list-pane-surfaces로 각 panel의 cmux ref 확보
+  4. 각 surface에 'claude --resume <sid>' 를 cmux send (subprocess argv, shell injection 방지)
+  5. 매핑 없는 panel은 skip (사용자가 직접)
+
+옵션:
+  --dry-run   실제 send 없이 어떤 명령이 갈지만 출력
+
+환경변수:
+  CMUX_SNAPSHOT_DIR     스냅샷 디렉토리. 기본 ~/.cmux-snapshots
+  CMUX_SESSION_FILE     cmux 세션 파일. 기본 ~/Library/Application Support/cmux/session-com.cmuxterm.app.json
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+SESSION_JSON = Path(
+    os.environ.get(
+        "CMUX_SESSION_FILE",
+        str(Path.home() / "Library/Application Support/cmux/session-com.cmuxterm.app.json"),
+    )
+)
+SNAPSHOT_DIR = Path(os.environ.get("CMUX_SNAPSHOT_DIR", str(Path.home() / ".cmux-snapshots")))
+MAP_FILE = SNAPSHOT_DIR / "session-map.jsonl"
+
+_REF_RE = re.compile(r"^(workspace|pane|surface):\d+$")
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
+
+
+def run(argv: list[str]) -> str:
+    """shell=False로 cmux 명령 실행 — shell injection 없음."""
+    r = subprocess.run(argv, capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def latest_panel_to_session() -> dict:
+    """{panel_uuid_upper: session_id} — 같은 panel은 가장 최근 ts 우선."""
+    if not MAP_FILE.exists():
+        return {}
+    latest: dict = {}
+    try:
+        with open(MAP_FILE) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                p = (r.get("panel") or "").upper()
+                s = r.get("session")
+                ts = r.get("ts", "")
+                if not (p and s):
+                    continue
+                cur = latest.get(p)
+                if not cur or ts > cur[0]:
+                    latest[p] = (ts, s)
+    except OSError:
+        return {}
+    return {k: v[1] for k, v in latest.items()}
+
+
+def collect_layout_panels(session: dict) -> list:
+    """[(workspace_idx, workspace_name, cwd, panel_uuid_upper)] — cmux JSON 순서대로."""
+    out: list = []
+    for window in session.get("windows", []):
+        for ws_idx, ws in enumerate(window.get("tabManager", {}).get("workspaces", []), start=1):
+            ws_name = ws.get("customTitle") or ws.get("processTitle", f"workspace {ws_idx}")
+            cwd = ws.get("currentDirectory", "")
+
+            def walk(node, ws_idx=ws_idx, ws_name=ws_name, cwd=cwd):
+                if isinstance(node, dict):
+                    if "pane" in node:
+                        for pid in node["pane"].get("panelIds", []):
+                            out.append((ws_idx, ws_name, cwd, pid.upper()))
+                    for v in node.values():
+                        walk(v)
+                elif isinstance(node, list):
+                    for v in node:
+                        walk(v)
+
+            walk(ws.get("layout", {}))
+    return out
+
+
+def list_workspaces() -> list:
+    """[(ws_ref, ws_name)] in current cmux CLI order."""
+    out = run(["cmux", "list-workspaces"])
+    res: list = []
+    for line in out.splitlines():
+        toks = line.split()
+        ws_ref = next((t for t in toks if t.startswith("workspace:") and _REF_RE.match(t)), None)
+        if not ws_ref:
+            continue
+        # ws_ref 다음 토큰부터가 name (selected 마커 제거)
+        try:
+            i = toks.index(ws_ref)
+            name_toks = [t for t in toks[i + 1:] if t not in ("[selected]", "*")]
+            name = " ".join(name_toks).strip()
+        except ValueError:
+            name = ""
+        res.append((ws_ref, name))
+    return res
+
+
+def map_json_ws_to_ref(session: dict, layout: list, cli_workspaces: list) -> dict:
+    """JSON workspace 순번 → cmux ws_ref. customTitle 우선 매칭, 동명은 panel 수로 disambiguate."""
+    json_ws_meta: list = []  # [(ws_idx, name, panel_count)]
+    for window in session.get("windows", []):
+        for ws_idx, ws in enumerate(window.get("tabManager", {}).get("workspaces", []), start=1):
+            name = ws.get("customTitle") or ws.get("processTitle", "")
+            cnt = sum(1 for entry in layout if entry[0] == ws_idx)
+            json_ws_meta.append((ws_idx, name, cnt))
+
+    used: set = set()
+    out: dict = {}
+    for ws_idx, name, _cnt in json_ws_meta:
+        # 같은 name 후보들 — 안 쓴 것 중 첫 번째
+        for ws_ref, cli_name in cli_workspaces:
+            if ws_ref in used:
+                continue
+            if cli_name.strip() == (name or "").strip():
+                out[ws_idx] = ws_ref
+                used.add(ws_ref)
+                break
+    return out
+
+
+def collect_surface_seq(ws_ref: str) -> list:
+    """ws_ref 내 모든 surface_ref를 cmux 출력 순서대로 수집."""
+    panes_out = run(["cmux", "list-panes", "--workspace", ws_ref])
+    pane_refs = [
+        tok for line in panes_out.splitlines() for tok in line.split()
+        if tok.startswith("pane:") and _REF_RE.match(tok)
+    ]
+    surf_seq: list = []
+    for pane_ref in pane_refs:
+        out = run(["cmux", "list-pane-surfaces", "--workspace", ws_ref, "--pane", pane_ref])
+        for line in out.splitlines():
+            for tok in line.split():
+                if tok.startswith("surface:") and _REF_RE.match(tok):
+                    surf_seq.append(tok)
+                    break
+    return surf_seq
+
+
+def _cmux_available() -> bool:
+    r = subprocess.run(["which", "cmux"], capture_output=True)
+    return r.returncode == 0
+
+
+def main() -> None:
+    if not _cmux_available():
+        print("Error: cmux CLI를 찾을 수 없습니다. cmux.app이 설치되어 있는지 확인하세요.")
+        sys.exit(1)
+
+    dry = "--dry-run" in sys.argv
+
+    panel_to_sid = latest_panel_to_session()
+    if not panel_to_sid:
+        print("✗ session-map.jsonl 비어있음. 먼저 SessionStart hook(cmux-snapshot-track)이 적립되어야 합니다.")
+        sys.exit(1)
+
+    if not SESSION_JSON.exists():
+        print(f"Error: cmux 세션 파일을 찾을 수 없습니다: {SESSION_JSON}")
+        sys.exit(1)
+
+    try:
+        with open(SESSION_JSON) as f:
+            session = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Error: 세션 파일 파싱 실패: {e}")
+        sys.exit(1)
+
+    layout = collect_layout_panels(session)
+    ws_refs = map_json_ws_to_ref(session, layout, list_workspaces())
+
+    print(f"매핑 {len(panel_to_sid)}개, 현재 layout {len(layout)} panel\n")
+
+    sent = 0
+    skipped = 0
+
+    for ws_idx in sorted({p[0] for p in layout}):
+        ws_ref = ws_refs.get(ws_idx)
+        if not ws_ref:
+            continue
+        ws_panels = [p for p in layout if p[0] == ws_idx]
+
+        surf_seq = collect_surface_seq(ws_ref)
+        if len(surf_seq) != len(ws_panels):
+            ws_name = ws_panels[0][1] if ws_panels else "?"
+            print(f"⚠ ws[{ws_idx}] {ws_name}: surface 수 {len(surf_seq)} != panel 수 {len(ws_panels)} (skip)")
+            continue
+
+        for (_, _, _cwd, panel_uuid), surf_ref in zip(ws_panels, surf_seq):
+            sid = panel_to_sid.get(panel_uuid)
+            if not sid or not _SESSION_ID_RE.match(sid):
+                skipped += 1
+                continue
+            print(f"  ws[{ws_idx}] {surf_ref} panel={panel_uuid[:8]} → sid={sid[:8]}")
+            if not dry:
+                run(["cmux", "send", "--workspace", ws_ref, "--surface", surf_ref,
+                     f"claude --resume {sid}\n"])
+            sent += 1
+
+    print(f"\n결과: sent={sent} skipped(매핑없음)={skipped} dry_run={dry}")
+
+
+if __name__ == "__main__":
+    main()
